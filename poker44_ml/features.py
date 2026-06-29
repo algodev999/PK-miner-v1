@@ -293,4 +293,66 @@ def chunk_features(chunk: list[dict[str, Any]]) -> dict[str, float]:
     out["schema_low_action_entropy_hand_rate"] = _safe_div(low_action_entropy, n)
     out["schema_high_actor_entropy_hand_rate"] = _safe_div(high_actor_entropy, n)
     out["schema_long_action_hand_rate"] = _safe_div(long_action_hand, n)
+
+    # ── Bot-signature features: cross-hand behavioral consistency ──────────
+    # Bots playing a fixed strategy are more consistent than humans across
+    # hands in the same session chunk.
+    vpip_per_hand: list[float] = []
+    bet_pot_fractions: list[float] = []
+    street_depth_per_hand: list[float] = []
+    flop_reached_per_hand: list[float] = []
+
+    for hand in chunk:
+        metadata = hand.get("metadata") or {}
+        hero_seat = _safe_int(metadata.get("hero_seat"), 0)
+        actions = hand.get("actions") or []
+        hero_preflop_voluntary = 0
+        streets_seen: set[str] = set()
+
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            street = str(action.get("street") or "").lower()
+            actor = _safe_int(action.get("actor_seat"), 0)
+            action_type = str(action.get("action_type") or "").lower()
+            amt = _safe_float(action.get("normalized_amount_bb"), 0.0)
+            pb = _safe_div(_safe_float(action.get("pot_before"), 0.0), 0.02)
+
+            if street:
+                streets_seen.add(street)
+            if street == "preflop" and actor == hero_seat and hero_seat > 0:
+                if action_type in ("call", "raise", "bet"):
+                    hero_preflop_voluntary = 1
+            if action_type in ("bet", "raise") and pb > 0.5:
+                # Bet/pot fraction: bots use consistent geometric sizing
+                bet_pot_fractions.append(_clamp01(amt / pb))
+
+        vpip_per_hand.append(float(hero_preflop_voluntary))
+        street_depth_per_hand.append(float(len(streets_seen)))
+        flop_reached_per_hand.append(float("flop" in streets_seen))
+
+    # VPIP consistency: bots have stable preflop voluntarily-putting-money-in rates
+    out["bot_vpip_mean"] = _mean(vpip_per_hand)
+    out["bot_vpip_std"] = _std(vpip_per_hand)
+
+    # Bet sizing relative to pot: bots use solver-consistent geometric fractions
+    out["bot_bet_pot_fraction_mean"] = _mean(bet_pot_fractions)
+    out["bot_bet_pot_fraction_std"] = _std(bet_pot_fractions)
+    out["bot_bet_pot_fraction_cv"] = _safe_div(
+        _std(bet_pot_fractions), max(_mean(bet_pot_fractions), 1e-6)
+    )
+
+    # Street depth consistency: bots have stable range → consistent flop/turn/river reach
+    out["bot_flop_reach_rate"] = _mean(flop_reached_per_hand)
+    out["bot_street_depth_std"] = _std(street_depth_per_hand)
+
+    # Per-hand action-rate std: bots fold/call/raise at consistent frequencies
+    out["bot_fold_rate_std"] = _std([f["schema_fold_share"] for f in per_hand])
+    out["bot_call_rate_std"] = _std([f["schema_call_share"] for f in per_hand])
+    out["bot_raise_rate_std"] = _std([f["schema_raise_share"] for f in per_hand])
+    _aggression_rates = [f["schema_aggression_share"] for f in per_hand]
+    out["bot_aggression_cv"] = _safe_div(
+        _std(_aggression_rates), max(_mean(_aggression_rates), 1e-6)
+    )
+
     return out

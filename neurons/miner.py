@@ -1,11 +1,13 @@
 """Poker44 miner with local stacked-model inference and transparent model manifests."""
 
 import hashlib
+import json
 import logging as stdlogging
 import os
 import subprocess
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -79,6 +81,10 @@ class Miner(BaseMinerNeuron):
             os.getenv("POKER44_LOG_SCORE_ARRAYS", "1").strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        _save_dir = os.getenv("POKER44_SAVE_SYNAPSE_DIR", "").strip()
+        self.synapse_save_dir: Path | None = Path(_save_dir) if _save_dir else None
+        if self.synapse_save_dir is not None:
+            self.synapse_save_dir.mkdir(parents=True, exist_ok=True)
         self.model_path = Path(
             os.getenv(
                 "POKER44_MODEL_PATH",
@@ -656,6 +662,22 @@ class Miner(BaseMinerNeuron):
             f"per_chunk_ms={per_chunk_ms:.2f} "
             f"per_hand_ms={per_hand_ms:.2f}"
         )
+        if self.synapse_save_dir is not None:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            save_path = self.synapse_save_dir / f"synapse_{ts}.json"
+            payload: Dict[str, Any] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "caller": caller,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "chunks": chunks,
+                "risk_scores": synapse.risk_scores,
+                "predictions": synapse.predictions,
+            }
+            try:
+                save_path.write_text(json.dumps(payload, indent=2, default=str))
+                bt.logging.info(f"Synapse saved | path={save_path}")
+            except Exception as _save_err:
+                bt.logging.warning(f"Failed to save synapse: {_save_err}")
         return synapse
 
     async def blacklist(self, synapse: DetectionSynapse) -> Tuple[bool, str]:
